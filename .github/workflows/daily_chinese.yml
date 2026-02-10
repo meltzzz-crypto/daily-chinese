@@ -1,0 +1,26 @@
+name: Daily Chinese Conversation
+
+on:
+  schedule:
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install Dependencies
+      run: |
+        pip install requests selenium webdriver_manager
+
+    - name: Run Bot
+      env:
+        # 새로 만든 중국어 채널 웹훅 주소!
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      run: python chinese_bot.py
