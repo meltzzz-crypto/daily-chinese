@@ -2,6 +2,7 @@ import os
 import time
 import requests
 import json
+import re
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -30,27 +31,88 @@ def get_todays_conversation():
     try:
         print(f"{TARGET_URL} 접속 중...")
         driver.get(TARGET_URL)
-        time.sleep(5)  # 로딩 대기 (중요!)
-        
-        # 1. 태그로 찾기 (광범위 검색)
-        print("대화 내용 찾는 중...")
+        time.sleep(5)  # 로딩 대기
+
+        # 1. JSON 데이터 추출 시도 (가장 확실한 방법)
+        print("숨겨진 JSON 데이터 찾는 중...")
+        try:
+            # Naver Learn Dict는 보통 __PRELOADED_STATE__ 또는 유사한 변수에 데이터를 담습니다.
+            page_source = driver.page_source
+            match = re.search(r'window\.__PRELOADED_STATE__\s*=\s*({.*?});', page_source)
+            
+            if match:
+                print("JSON 데이터 발견! 파싱 시도...")
+                json_str = match.group(1)
+                json_data = json.loads(json_str)
+                
+                # 재귀적으로 키를 찾는 함수
+                def find_key(obj, key):
+                    if isinstance(obj, dict):
+                        if key in obj: return obj[key]
+                        for k, v in obj.items():
+                            item = find_key(v, key)
+                            if item: return item
+                    elif isinstance(obj, list):
+                        for v in obj:
+                            item = find_key(v, key)
+                            if item: return item
+                    return None
+
+                # 대화 내용 찾기
+                sentences = find_key(json_data, 'sentences') or find_key(json_data, 'sentenceList')
+                
+                if sentences:
+                    print(f"대화 문장 {len(sentences)}개 발견 (JSON)")
+                    for sent in sentences:
+                        chn = sent.get('origin_text') or sent.get('orgnTxt') or sent.get('txt_origin') or sent.get('origin', '')
+                        kor = sent.get('trans_text') or sent.get('transTxt') or sent.get('txt_trans') or sent.get('trans', '')
+                        pin = sent.get('pinyin_text') or sent.get('pinyinTxt') or sent.get('txt_pinyin') or sent.get('pinyin', '')
+                        
+                        # 태그 제거
+                        chn = re.sub(r'<[^>]+>', '', chn).strip()
+                        kor = re.sub(r'<[^>]+>', '', kor).strip()
+                        pin = re.sub(r'<[^>]+>', '', pin).strip()
+
+                        if chn and kor:
+                            data['dialogues'].append({
+                                "chinese": chn,
+                                "pinyin": pin,
+                                "korean": kor
+                            })
+
+                # 단어 찾기
+                words = find_key(json_data, 'words') or find_key(json_data, 'wordList')
+                if words:
+                     print(f"단어 {len(words)}개 발견 (JSON)")
+                     for w in words:
+                         entry = w.get('entry_name') or w.get('entryName') or w.get('txt_origin') or w.get('origin', '')
+                         mean = w.get('mean_text') or w.get('meanTxt') or w.get('txt_trans') or w.get('trans', '')
+                         if entry:
+                             data['words'].append(f"{entry} : {mean}")
+
+                if data['dialogues']:
+                    data['title'] = f"{datetime.now().strftime('%Y-%m-%d')} 오늘의 회화 (JSON)"
+                    return data 
+        except Exception as e:
+            print(f"JSON 추출 실패: {e}")
+
+        # 2. JSON 실패 시 HTML 태그로 찾기 (Fallback)
+        print("JSON 실패, HTML 태그로 재시도...")
         origins = driver.find_elements(By.CSS_SELECTOR, "[class*='origin'], [class*='chn']")
         trans = driver.find_elements(By.CSS_SELECTOR, "[class*='trans'], [class*='kor']")
         
-        # 대화쌍 맞추기
         min_len = min(len(origins), len(trans))
         for i in range(min_len):
             chn = origins[i].text.strip()
             kor = trans[i].text.strip()
             if chn and kor:
-                data['dialogues'].append({"chinese": chn, "korean": kor})
+                data['dialogues'].append({"chinese": chn, "korean": kor, "pinyin": ""})
 
-        # 2. 단어 찾기
         words = driver.find_elements(By.CSS_SELECTOR, "div.section_word li, ul[class*='word'] li")
         for w in words:
             data['words'].append(w.text.replace("\n", " : "))
 
-        data['title'] = f"{datetime.now().strftime('%Y-%m-%d')} 오늘의 회화"
+        data['title'] = f"{datetime.now().strftime('%Y-%m-%d')} 오늘의 회화 (HTML)"
 
     except Exception as e:
         print(f"오류 발생: {e}")
@@ -64,12 +126,11 @@ def send_to_discord(data):
         print("웹훅 주소가 없습니다!")
         return
 
-    # 실패 시 알림
     if not data['dialogues']:
         print("데이터 없음. 오류 메시지 전송.")
         requests.post(WEBHOOK_URL, json={
             "username": "용용이 (오류)",
-            "content": "⚠️ 네이버 페이지에 들어갔는데 대화 내용을 못 찾았어요. (HTML 구조가 바뀐 것 같습니다.)"
+            "content": "⚠️ 네이버 JSON 데이터도, HTML 태그도 모두 찾지 못했습니다. 네이버 보안이 강력해진 것 같습니다."
         })
         return
         
@@ -83,9 +144,10 @@ def send_to_discord(data):
     }
     
     for dia in data['dialogues'][:10]:
+        val = f"{dia['pinyin']}\n{dia['korean']}" if dia.get('pinyin') else dia['korean']
         embed["fields"].append({
             "name": dia['chinese'],
-            "value": dia['korean'],
+            "value": val,
             "inline": False
         })
         
@@ -103,4 +165,3 @@ if __name__ == "__main__":
     data = get_todays_conversation()
     print(json.dumps(data, indent=2, ensure_ascii=False))
     send_to_discord(data)
-
